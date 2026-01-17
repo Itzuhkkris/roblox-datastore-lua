@@ -1,0 +1,182 @@
+local Players = game:GetService("Players")
+local DataStoreService = game:GetService("DataStoreService")
+local RunService = game:GetService("RunService")
+
+local Store = DataStoreService:GetDataStore("AdvancedGoKartStore_V1")
+
+local SessionCache = {}
+local SavingQueue = {}
+local ActiveSessions = {}
+
+local Defaults = {
+Coins = 0,
+Level = 1,
+EquippedKart = "StarterKart",
+Karts = {
+StarterKart = {
+Speed = 40,
+Handling = 1,
+Boost = 1
+}
+}
+}
+
+local function clone(value)
+if type(value) ~= "table" then
+return value
+end
+local new = {}
+for k, v in pairs(value) do
+new[k] = clone(v)
+end
+return new
+end
+
+local function merge(base, incoming)
+for k, v in pairs(incoming) do
+if type(v) == "table" and type(base[k]) == "table" then
+merge(base[k], v)
+else
+base[k] = v
+end
+end
+end
+
+local function createSession(player)
+local profile = clone(Defaults)
+SessionCache[player.UserId] = profile
+ActiveSessions[player.UserId] = true
+end
+
+local function loadProfile(player)
+local data
+local success = false
+
+for i = 1, 5 do
+	local ok, result = pcall(function()
+		return Store:GetAsync(player.UserId)
+	end)
+	if ok then
+		data = result
+		success = true
+		break
+	end
+	task.wait(i)
+end
+
+createSession(player)
+
+if success and type(data) == "table" then
+	merge(SessionCache[player.UserId], data)
+end
+end
+
+local function applyAttributes(player)
+local data = SessionCache[player.UserId]
+if not data then return end
+
+player:SetAttribute("Coins", data.Coins)
+player:SetAttribute("Level", data.Level)
+player:SetAttribute("EquippedKart", data.EquippedKart)
+
+local folder = Instance.new("Folder")
+folder.Name = "KartInventory"
+folder.Parent = player
+
+for name, stats in pairs(data.Karts) do
+	local kart = Instance.new("Folder")
+	kart.Name = name
+	kart.Parent = folder
+
+	for stat, value in pairs(stats) do
+		local v = Instance.new("NumberValue")
+		v.Name = stat
+		v.Value = value
+		v.Parent = kart
+	end
+end
+end
+
+local function captureProfile(player)
+local data = SessionCache[player.UserId]
+if not data then return end
+
+data.Coins = player:GetAttribute("Coins") or data.Coins
+data.Level = player:GetAttribute("Level") or data.Level
+data.EquippedKart = player:GetAttribute("EquippedKart") or data.EquippedKart
+
+local folder = player:FindFirstChild("KartInventory")
+if folder then
+	data.Karts = {}
+	for _, kart in ipairs(folder:GetChildren()) do
+		local stats = {}
+		for _, v in ipairs(kart:GetChildren()) do
+			if v:IsA("NumberValue") then
+				stats[v.Name] = v.Value
+			end
+		end
+		data.Karts[kart.Name] = stats
+	end
+end
+end
+
+local function enqueueSave(player)
+SavingQueue[player.UserId] = true
+end
+
+local function commitSave(userId)
+local data = SessionCache[userId]
+if not data then return end
+
+for i = 1, 5 do
+	local ok = pcall(function()
+		Store:SetAsync(userId, data)
+	end)
+	if ok then
+		break
+	end
+	task.wait(i)
+end
+end
+
+local function flushSaves()
+for userId in pairs(SavingQueue) do
+SavingQueue[userId] = nil
+commitSave(userId)
+end
+end
+
+local function releaseSession(player)
+captureProfile(player)
+enqueueSave(player)
+ActiveSessions[player.UserId] = nil
+end
+
+Players.PlayerAdded:Connect(function(player)
+loadProfile(player)
+applyAttributes(player)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+releaseSession(player)
+end)
+
+task.spawn(function()
+while true do
+task.wait(30)
+flushSaves()
+end
+end)
+
+game:BindToClose(function()
+for _, player in ipairs(Players:GetPlayers()) do
+releaseSession(player)
+end
+flushSaves()
+task.wait(2)
+end)
+
+if RunService:IsStudio() then
+print("Go Kart Data System Online")
+end
+
